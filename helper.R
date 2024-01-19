@@ -1,0 +1,1 @@
+# Script for house-keeping the project on GitHub
