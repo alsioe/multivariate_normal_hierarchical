@@ -26,9 +26,12 @@ data {
 // The parameters accepted by the model. Our model
 // accepts two parameters 'mu' and 'sigma'.
 parameters {
-  vector[n_subj] alpha_by_subj;
-  vector[n_subj] beta_by_subj;
-
+  vector[n_subj] alpha_by_subj_raw;
+  vector[n_subj] beta_by_subj_raw;
+  
+  real alpha_mean;
+  real beta_mean;
+  
   real<lower=0> sd_alpha;
   real<lower=0> sd_beta;
   
@@ -37,17 +40,28 @@ parameters {
   
 }
 
+transformed parameters {
+  vector[n_subj] alpha_by_subj;
+  vector[n_subj] beta_by_subj;
+  
+  alpha_by_subj = alpha_mean + alpha_by_subj_raw * sd_alpha;
+  beta_by_subj = beta_mean + beta_by_subj_raw * sd_beta;
+}
+
 // The model to be estimated. We model the output
 // 'y' to be normally distributed with mean 'mu'
 // and standard deviation 'sigma'.
 model {
   
-  alpha_by_subj ~ normal(0, 10);
-  beta_by_subj ~ normal(0, 10);
+  alpha_mean ~ normal(0, 10);
+  beta_mean ~ normal(0, 10);
   
   sd_alpha ~ weibull(2, 10);
   sd_beta ~ weibull(2, 1);
-
+  
+  alpha_by_subj_raw ~ std_normal();
+  beta_by_subj_raw ~ std_normal();
+  
   sd_y ~ weibull(2, 2);
     
   y ~ normal(alpha_by_subj[subj_id] + beta_by_subj[subj_id] .* x,

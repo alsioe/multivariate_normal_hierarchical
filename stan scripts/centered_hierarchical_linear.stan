@@ -28,7 +28,10 @@ data {
 parameters {
   vector[n_subj] alpha_by_subj;
   vector[n_subj] beta_by_subj;
-
+  
+  real alpha_mean;
+  real beta_mean;
+  
   real<lower=0> sd_alpha;
   real<lower=0> sd_beta;
   
@@ -42,12 +45,15 @@ parameters {
 // and standard deviation 'sigma'.
 model {
   
-  alpha_by_subj ~ normal(0, 10);
-  beta_by_subj ~ normal(0, 10);
+  alpha_mean ~ normal(0, 10);
+  beta_mean ~ normal(0, 10);
   
   sd_alpha ~ weibull(2, 10);
   sd_beta ~ weibull(2, 1);
-
+  
+  alpha_by_subj ~ normal(alpha_mean, sd_alpha);
+  beta_by_subj ~ normal(beta_mean, sd_beta);
+  
   sd_y ~ weibull(2, 2);
     
   y ~ normal(alpha_by_subj[subj_id] + beta_by_subj[subj_id] .* x,

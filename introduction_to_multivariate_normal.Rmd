@@ -93,7 +93,7 @@ summary <- rstan::summary(fit_normal,
 
 # We want all the Rhats to be less than 1.01, and we need n_eff to be >100 but
 # ideally in the thousands
-round(summary$summary, 3)
+round(summary$summary, 2)
 
 # Extract the posterior distributions from the fit
 par <- rstan::extract(fit_normal)
@@ -228,7 +228,7 @@ normal_data <- data.frame(
 )
 
 # In this (simplistic) case we will have a common noise level on all data
-sd_y <- 5
+sd_y <- 10
 
 normal_data$y <- linear(alpha = true_linear$alpha[normal_data$subj_id],
                         beta = true_linear$beta[normal_data$subj_id],
@@ -260,6 +260,9 @@ linear_data_for_stan <- list(n_y = dim(normal_data)[1],
                              x = normal_data$x,
                              y = normal_data$y)
 
+# Note to self: the standard deviations are not informed by the data so should
+# be removed from this, the simplest model!
+
 fit_linear <- rstan::stan(file = 'stan scripts/linear.stan',
                           model_name = 'linear',
                           data = linear_data_for_stan,
@@ -281,7 +284,7 @@ summary <- rstan::summary(fit_linear,
 
 # We want all the Rhats to be less than 1.01, and we need n_eff to be >100 but
 # ideally in the thousands
-round(summary$summary, 3)
+round(summary$summary, 2)
 
 # Extract the posterior distributions from the fit
 par <- rstan::extract(fit_linear)
@@ -419,33 +422,223 @@ ggplot(data = df_wide_quantiles,
 The estimates are very wide at this point, representing the fact that the measurement
 noise (sd_y) is quite high, and we only have two measurements per x value. If we were
 able to re-run the experiment, perhaps we would improve the measurements - or simply
-collect more measurements per x value! But if we cannot easily re-do the experiment,
-we can still improve the fit by making some additions to the model.
+try to collect more measurements per x value! But if we cannot easily re-do the
+experiment, we can still improve the fit by making some additions to the model.
 
-1) Assume that the individuals represent draws from a normally distributed population.
-2) Assume that the parameters come from a multivariate normal distribution
+i) Assume that the individuals represent draws from a normally distributed population.
+ii) Assume that the parameters come from a multivariate normal distribution
 
 ```{r introducing hierarchical modelling}
 
+# The updated stan file is using hierarchical priors on the subjects' parameters.
+# alpha_by_subj ~ normal(alpha_mean, sd_alpha;
+hierarchical_linear_fit <- rstan::stan(file = 'stan scripts/centered_hierarchical_linear.stan',
+                                       model_name = 'hierarchical_linear',
+                                       data = linear_data_for_stan,
+                                       chains = 4,
+                                       cores = 4,
+                                       iter = 4000,
+                                       warmup = 2000,
+                                       control = list(adapt_delta = 0.99)
+                                       ) 
 
+# There are a number of error messages about divergent transitions - this is standard
+# when running not-yet optimised hierarchical models and it is not a major concern
+# until they start to ramp up in numbers in more complex models. We can sort them
+# straight away though - these divergent transitions are caused by the
+# correlations between the parameters-by-subj and the group mean.
+# A simple trick is to used the 'non-centered parameterisation' which
+# treats each subject's value as the sum of the mean and some 'raw' subject effect,
+# which is the difference between the subject's value and the mean, measured in
+# standard deviations.
+# alpha_by_subj = alpha_mean + alpha_by_subj_raw * sd_alpha;
+# We then put a 'standard normal' prior on the raw subject value
+# alpha_by_subj_raw ~ normal(0, 3);
+# (Note that the function std_normal() is identifical to normal(0, 3))
+
+hierarchical_linear_fit <- rstan::stan(file = 'stan scripts/hierarchical_linear.stan',
+                                       model_name = 'hierarchical_linear',
+                                       data = linear_data_for_stan,
+                                       chains = 4,
+                                       cores = 4,
+                                       iter = 4000,
+                                       warmup = 2000,
+                                       control = list(adapt_delta = 0.99)
+                                       )
+
+# Hopefully no divergent transitions! The alpha_by_subj_raw does NOT interact
+# in the same way with the overall mean, and the sampler runs smoothly.
+
+# Inspect the trace plots - we want them to look like 'hairy caterpillars''
+# https://druedin.com/2016/12/26/that-hairy-caterpillar/
+rstan::traceplot(hierarchical_linear_fit)
+
+# Create summary object and print out the overall summary (a.k.a. summary$summary)
+summary <- rstan::summary(hierarchical_linear_fit,
+                     probs = c(0.025, 0.5, 0.975)
+                     )
+
+# We want all the Rhats to be less than 1.01, and we need n_eff to be >100 but
+# ideally in the thousands
+round(summary$summary, 2)
+
+# Extract the posterior distributions from the fit
+par <- rstan::extract(hierarchical_linear_fit)
+
+par_names <- c('alpha_mean',
+               'beta_mean',
+               'alpha_by_subj',
+               'beta_by_subj',
+               'sd_alpha',
+               'sd_beta',
+               'sd_y')
+
+for (s in 1:N) {
+    if (s == 1) {
+        df <- data.frame(
+            subj_id = vector(),
+            iter = vector(),
+            alpha_by_subj = vector(),
+            beta_by_subj = vector()
+        )
+    }
+    
+    df <- rbind(df,
+                data.frame(
+                    subj_id = rep(s, length(par$alpha_by_subj[, s])),
+                    iter = 1:length(par$alpha_by_subj[, s]),
+                    alpha_by_subj = par$alpha_by_subj[, s],
+                    beta_by_subj = par$beta_by_subj[, s]
+                    )
+                )
+}
+
+df_long <- pivot_longer(data = df,
+                        cols = !c(subj_id, iter),
+                        names_to = 'parameter',
+                        values_to = 'sample')
+
+df_long <- rbind(df_long,
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'alpha_mean',
+                    sample = par$alpha_mean
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'beta_mean',
+                    sample = par$beta_mean
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'sd_alpha',
+                    sample = par$sd_alpha
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'sd_beta',
+                    sample = par$sd_beta
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'sd_y',
+                    sample = par$sd_y
+                    )
+                 )
+    
+par_names <- unique(df_long$parameter)
+
+# Make the parameter column a factor for easier data handling and graphing
+df_long$parameter <- factor(x = df_long$parameter,
+                            levels = par_names
+                            )
+
+# Plot the probability densities with vertical lines (geom_vline) at 'real' value
+ggplot(data = df_long,
+       mapping = aes(x = sample,
+                     colour = as.factor(subj_id))
+       ) +
+    facet_wrap(~ parameter,
+               scales = 'free',
+               ncol = 4) +
+    geom_density() +
+    theme_bw()
+
+# Quantile function with updated probs
+# https://www.tidyverse.org/blog/2023/02/dplyr-1-1-0-pick-reframe-arrange/
+quantile_df <- function(x, probs = c(0.025, 0.5, 0.975)) {
+  tibble(
+    value = quantile(x, probs, na.rm = TRUE),
+    prob = probs
+  )
+}
+
+# ALPHA PARAMETER
+# 
+# plot(x = true_linear$beta,
+#      y = colMeans(par$beta_by_subj)
+#      )
+
+df_wide_quantiles <- df_long %>%
+                        filter(parameter == 'alpha_by_subj') %>%
+                        reframe(quantile_df(sample), .by = subj_id) %>%
+                        pivot_wider(id_cols = c(subj_id),
+                                    names_from = prob,
+                                    values_from = value)
+
+names(df_wide_quantiles) <- c('subj_id', 'low', 'median', 'high')
+
+ggplot(data = df_wide_quantiles,
+       mapping = aes(y = median,
+                     ymin = low,
+                     ymax = high,
+                     colour = as.factor(subj_id))
+       ) +
+    geom_point(aes(x = true_linear$alpha,
+                   y = true_linear$alpha)) +
+    geom_errorbar(aes(x = true_linear$alpha),
+                  width=.2) +
+    theme_bw()
+
+# BETA PARAMETER
+df_wide_quantiles <- df_long %>%
+                        filter(parameter == 'beta_by_subj') %>%
+                        reframe(quantile_df(sample), .by = subj_id) %>%
+                        pivot_wider(id_cols = c(subj_id),
+                                    names_from = prob,
+                                    values_from = value)
+
+names(df_wide_quantiles) <- c('subj_id', 'low', 'median', 'high')
+
+ggplot(data = df_wide_quantiles,
+       mapping = aes(y = median,
+                     ymin = low,
+                     ymax = high,
+                     colour = as.factor(subj_id))
+       ) +
+    geom_point(aes(x = true_linear$beta,
+                   y = true_linear$beta)) +
+    geom_errorbar(aes(x = true_linear$beta),
+                  width=.1) +
+    theme_bw()
 
 ```
 
-Introduce correlations between parameters
+## Introduce correlations between parameters
+
+In the real world, parameters can often be correlated. Imagine for instance
+that subjects with a high intercept have a lower slope parameter.
+We can simulate this using the function mvrnorm() from the MASS package in R.
+This function creates a multivariate normal distribution,
+which is simply a set of k parameters, each of which is normally distributed
+and which are specified to share some covariance (correlations).
 
 ```{r multinormal}
-
-# In the previous example, we can check visually whether the two parameters are related.
-# 
-plot(x = true_parameters$alpha,
-     y = true_parameters$beta)
-
-# In the real world, parameters can often be correlated. Imagine for instance
-# that subjects with a high intercept have a lower slope parameter.
-# We can simulate this using the MASS package and the function mvrnorm().
-# What this function does is to create a multivariate normal distribution,
-# which is simply a set of k parameters each of which is normally distributed
-# and which share some covariance (correlations).
 
 # The function mvrnorm() requires k means but and we then need to supply a
 # k x k covariance matrix Sigma, which contains information both about the
@@ -454,30 +647,47 @@ plot(x = true_parameters$alpha,
 # It is usually easier to specify the correlation matrix Omega,
 # and simply transform it to the covariance matrix Sigma, like so:
 
+# Update any settings?
+N <- 30
+n_rep <- 2
+x_series <- seq(from = -10, to = 10, by = 5)
+sd_y <- 10
+
+# Create data structure
+normal_data$y <- linear(alpha = true_linear$alpha[normal_data$subj_id],
+                        beta = true_linear$beta[normal_data$subj_id],
+                        x = normal_data$x) +
+                 rnorm(n = length(normal_data$y),
+                       mean = 0,
+                       sd = sd_y)
+
 Omega <- matrix(data = c(1, -0.9,
                          -0.9, 1),
                 ncol = 2)
 
 mu <- c(10, 2)
 sigma <- c(1, 0.5)
-
+ 
 # Transform from correlation matrix to covariance matrix
 Sigma <- diag(sigma) %*% Omega %*% diag(sigma)
+ 
+true_multi_normal <- data.frame(
+                    subj_id = 1:N,
+                    alpha = NA,
+                    beta = NA
+                    )
 
-correlated_parameters <- data.frame(
-                            subj_id = 1:N,
-                            alpha = NA,
-                            beta = NA
-                          )
-
-correlated_parameters[, 2:3] <- MASS::mvrnorm(n = N,
+true_multi_normal[, 2:3] <- MASS::mvrnorm(n = N,
                                               mu = mu,
                                               Sigma = Sigma)
 
-plot(correlated_parameters[, 2:3])
+plot(x = true_multi_normal$alpha,
+     y = true_multi_normal$beta)
 
+cor(x = true_multi_normal$alpha,
+    y = true_multi_normal$beta)
 
-# We can then create a new set of data (with noise)
+# We can then create a new data structure ...
 multi_normal_data <- data.frame(
     subj_id = gl(n = N, k = n_rep * length(x_series)),
     rep = rep(x = 1:n_rep,
@@ -487,16 +697,17 @@ multi_normal_data <- data.frame(
     y = NA
 )
 
+# And randomise some values (with noise)
 multi_normal_data$y <-
     linear(
-        alpha = correlated_parameters$alpha[multi_normal_data$subj_id],
-        beta = correlated_parameters$beta[multi_normal_data$subj_id],
+        alpha = true_multi_normal$alpha[multi_normal_data$subj_id],
+        beta = true_multi_normal$beta[multi_normal_data$subj_id],
         x = normal_data$x
         ) +
     rnorm(n = length(multi_normal_data$y),
         mean = 0,
         sd = sd_y)
-
+# 
 # Example plots - note that slopes get lower, the higher the intercept!
 ggplot(data = filter(multi_normal_data, subj_id %in% c(1, 2, 3, 4, 5, 6)),
        mapping = aes(x = x,
@@ -508,99 +719,216 @@ ggplot(data = filter(multi_normal_data, subj_id %in% c(1, 2, 3, 4, 5, 6)),
 
 ```
 
-Et voilà! Here comes the question - can we model this in Stan?
+What happens if we try to model this in Stan?
 
 ```{r noisy data from normal distributions}
 
-# samples to draw from each distribution
-N <- 20
+multi_normal_data_for_stan <- list(n_y = dim(multi_normal_data)[1],
+                             n_subj = length(unique(multi_normal_data$subj_id)),
+                             n_theta = 2,
+                             subj_id = as.integer(multi_normal_data$subj_id),
+                             x = multi_normal_data$x,
+                             y = multi_normal_data$y)
 
-true_parameters <- data.frame(
-        subj_id = 1:N,
-        alpha = rnorm(N, 100, 10),
-        beta = rnorm(N, 1, 0.2),
-        gamma = rnorm(N, 2, 1),
-        delta = rnorm(N, 10, 5)
+# The model itself has got some unexpected matrix structures - those are there
+# to handle the effects of within-subject conditions and between-subject effects
+multi_normal_linear_fit <- rstan::stan(file = 'stan scripts/multi_normal_linear.stan',
+                                       model_name = 'multi_normal_linear',
+                                       data = multi_normal_data_for_stan,
+                                       chains = 4,
+                                       cores = 4,
+                                       iter = 4000,
+                                       warmup = 2000,
+                                       control = list(adapt_delta = 0.99)
+                                       )
+
+# Hopefully no divergent transitions! The alpha_by_subj_raw does NOT interact
+# in the same way with the overall mean, and the sampler runs smoothly.
+
+# Inspect the trace plots - we want them to look like 'hairy caterpillars''
+# https://druedin.com/2016/12/26/that-hairy-caterpillar/
+rstan::traceplot(multi_normal_linear_fit)
+
+# Create summary object and print out the overall summary (a.k.a. summary$summary)
+summary <- rstan::summary(multi_normal_linear_fit,
+                     probs = c(0.025, 0.5, 0.975)
+                     )
+
+# We want all the Rhats to be less than 1.01, and we need n_eff to be >100 but
+# ideally in the thousands
+round(summary$summary, 2)
+
+# Extract the posterior distributions from the fit
+par <- rstan::extract(multi_normal_linear_fit,
+                      par = c('alpha_mean',
+                              'beta_mean',
+                              'alpha_by_subj',
+                              'beta_by_subj',
+                              'sd_alpha',
+                              'sd_beta',
+                              'sd_y')
+                      )
+
+par_names <- c('alpha_mean',
+               'beta_mean',
+               'alpha_by_subj',
+               'beta_by_subj',
+               'sd_alpha',
+               'sd_beta',
+               'sd_y')
+
+for (s in 1:N) {
+    if (s == 1) {
+        df <- data.frame(
+            subj_id = vector(),
+            iter = vector(),
+            alpha_by_subj = vector(),
+            beta_by_subj = vector()
         )
-
-true_parameters_long <- true_parameters %>%
-    pivot_longer(cols = !subj_id,
-                 names_to = 'parameter',
-                 values_to = 'value')
-
-true_parameters_long$parameter <- factor(x = true_parameters_long$parameter,
-                              levels = c('alpha', 'beta', 'gamma', 'delta')
-                              )
-
-four_PL <- function(alpha, beta, gamma, delta, x) {
-        delta + (alpha - delta) / (1 + exp(- beta * x + gamma))
+    }
+    
+    df <- rbind(df,
+                data.frame(
+                    subj_id = rep(s, length(par$alpha_by_subj[, 1, s])),
+                    iter = 1:length(par$alpha_by_subj[, 1, s]),
+                    alpha_by_subj = par$alpha_by_subj[, 1, s],
+                    beta_by_subj = par$beta_by_subj[, 1, s]
+                    )
+                )
 }
 
-# There is a trick here somewhere to plot all graphs in one
-ggplot(data = true_parameters_long,
-       mapping = aes(x = value)
+df_long <- pivot_longer(data = df,
+                        cols = !c(subj_id, iter),
+                        names_to = 'parameter',
+                        values_to = 'sample')
+
+df_long <- rbind(df_long,
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'alpha_mean',
+                    sample = par$alpha_mean
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'beta_mean',
+                    sample = par$beta_mean
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'sd_alpha',
+                    sample = par$sd_alpha
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'sd_beta',
+                    sample = par$sd_beta
+                    ),
+                 data.frame(
+                    subj_id = rep(0, length(par$sd_y)),
+                    iter = 1:length(length(par$sd_y)),
+                    parameter = 'sd_y',
+                    sample = par$sd_y
+                    )
+                 )
+    
+par_names <- unique(df_long$parameter)
+
+# Make the parameter column a factor for easier data handling and graphing
+df_long$parameter <- factor(x = df_long$parameter,
+                            levels = par_names
+                            )
+
+# Plot the probability densities with vertical lines (geom_vline) at 'real' value
+ggplot(data = df_long,
+       mapping = aes(x = sample,
+                     colour = as.factor(subj_id))
        ) +
     facet_wrap(~ parameter,
-               scales = 'free') +
-    geom_histogram() +
+               scales = 'free',
+               ncol = 4) +
+    geom_density() +
     theme_bw()
 
-# Set up a palette
-my_palette <- viridis::viridis(n = N)
-
-# Set up canvas
-plot <- ggplot() +
-        xlim(-10, 10) +
-        theme_bw()
-
-# Add the individual curves    
-for (n in 1:N) {
-    plot <- plot +
-    geom_function(fun = four_PL,
-                  args = list(alpha = true_parameters$alpha[n],
-                              beta = true_parameters$beta[n],
-                              gamma = true_parameters$gamma[n],
-                              delta = true_parameters$delta[n]
-                              ),
-                  colour = my_palette[n]
-                  )        
+# Quantile function with updated probs
+# https://www.tidyverse.org/blog/2023/02/dplyr-1-1-0-pick-reframe-arrange/
+quantile_df <- function(x, probs = c(0.025, 0.5, 0.975)) {
+  tibble(
+    value = quantile(x, probs, na.rm = TRUE),
+    prob = probs
+  )
 }
 
-plot
+# ALPHA PARAMETER
+# 
+# plot(x = true_linear$beta,
+#      y = colMeans(par$beta_by_subj)
+#      )
 
-# We now know how to draw perfect data - but we want noisy data!
-# Let's add some noise and collect data in replicates at various x values
+df_alpha_quantiles <- df_long %>%
+                        filter(parameter == 'alpha_by_subj') %>%
+                        reframe(quantile_df(sample), .by = subj_id) %>%
+                        pivot_wider(id_cols = c(subj_id),
+                                    names_from = prob,
+                                    values_from = value)
 
-n_rep <- 3
-x_series <- seq(from = -10, to = 10, by = 1)
+names(df_alpha_quantiles) <- c('subj_id', 'low', 'median', 'high')
 
-normal_data <- data.frame(
-    subj_id = gl(n = N, k = n_rep * length(x_series)),
-    rep = rep(x = 1:n_rep,
-              times = N * length(x_series)),
-    x = rep(x = sort(rep(x_series, n_rep)),
-            times = N),
-    y = NA
-)
+ggplot(data = df_alpha_quantiles,
+       mapping = aes(y = median,
+                     ymin = low,
+                     ymax = high,
+                     colour = as.factor(subj_id))
+       ) +
+    geom_point(aes(x = true_multi_normal$alpha,
+                   y = true_multi_normal$alpha)) +
+    geom_errorbar(aes(x = true_multi_normal$alpha),
+                  width=.2) +
+    theme_bw()
 
-# In this (simplistic) case we will have a common noise level on all data
-sd_y <- 5
+# BETA PARAMETER
+df_beta_quantiles <- df_long %>%
+                        filter(parameter == 'beta_by_subj') %>%
+                        reframe(quantile_df(sample), .by = subj_id) %>%
+                        pivot_wider(id_cols = c(subj_id),
+                                    names_from = prob,
+                                    values_from = value)
 
-normal_data$y <- four_PL(alpha = true_parameters$alpha[normal_data$subj_id],
-                         beta = true_parameters$beta[normal_data$subj_id],
-                         gamma = true_parameters$gamma[normal_data$subj_id],
-                         delta = true_parameters$delta[normal_data$subj_id],
-                         x = normal_data$x) +
-                 rnorm(n = length(normal_data$y),
-                       mean = 0,
-                       sd = sd_y)
+names(df_beta_quantiles) <- c('subj_id', 'low', 'median', 'high')
 
-ggplot(data = filter(normal_data, subj_id %in% c(1, 2, 3, 4, 5, 6)),
-       mapping = aes(x = x,
-                     y = y,
-                     colour = subj_id)) +
-    geom_jitter(width = 0.1)
+ggplot(data = df_beta_quantiles,
+       mapping = aes(y = median,
+                     ymin = low,
+                     ymax = high,
+                     colour = as.factor(subj_id))
+       ) +
+    geom_point(aes(x = true_multi_normal$beta,
+                   y = true_multi_normal$beta)) +
+    geom_errorbar(aes(x = true_multi_normal$beta),
+                  width=.1) +
+    theme_bw()
 
+# CORRELATION!
+ggplot(data = df_alpha_quantiles,
+       mapping = aes(y = median,
+                     ymin = low,
+                     ymax = high,
+                     colour = as.factor(subj_id))
+       ) +
+    geom_point(aes(x = df_beta_quantiles$median)) +
+    theme_bw()
+
+
+cor(df_alpha_quantiles$median,
+    df_beta_quantiles$median)
+
+estimated_Omega <- rstan::extract(multi_normal_linear_fit, par = c('Sigma', 'L', 'Omega'))
+
+str(estimated_Omega$Omega)
+str(estimated_Omega$L)
 
 ```
 
