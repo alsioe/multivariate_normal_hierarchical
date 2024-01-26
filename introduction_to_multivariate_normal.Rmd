@@ -451,6 +451,9 @@ hierarchical_linear_fit <- rstan::stan(file = 'stan scripts/centered_hierarchica
 # treats each subject's value as the sum of the mean and some 'raw' subject effect,
 # which is the difference between the subject's value and the mean, measured in
 # standard deviations.
+# 
+# https://mc-stan.org/docs/stan-users-guide/reparameterization.html
+# 
 # alpha_by_subj = alpha_mean + alpha_by_subj_raw * sd_alpha;
 # We then put a 'standard normal' prior on the raw subject value
 # alpha_by_subj_raw ~ normal(0, 3);
@@ -648,10 +651,10 @@ and which are specified to share some covariance (correlations).
 # and simply transform it to the covariance matrix Sigma, like so:
 
 # Update any settings?
-N <- 30
+N <- 20
 n_rep <- 2
 x_series <- seq(from = -10, to = 10, by = 5)
-sd_y <- 10
+sd_y <- 5
 
 # Create data structure
 normal_data$y <- linear(alpha = true_linear$alpha[normal_data$subj_id],
@@ -665,8 +668,8 @@ Omega <- matrix(data = c(1, -0.9,
                          -0.9, 1),
                 ncol = 2)
 
-mu <- c(10, 2)
-sigma <- c(1, 0.5)
+mu <- c(10, 3)
+sigma <- c(10, 3)
  
 # Transform from correlation matrix to covariance matrix
 Sigma <- diag(sigma) %*% Omega %*% diag(sigma)
@@ -732,6 +735,7 @@ multi_normal_data_for_stan <- list(n_y = dim(multi_normal_data)[1],
 
 # The model itself has got some unexpected matrix structures - those are there
 # to handle the effects of within-subject conditions and between-subject effects
+# - they will allow us to seamlessly move to mixed within-between effects
 multi_normal_linear_fit <- rstan::stan(file = 'stan scripts/multi_normal_linear.stan',
                                        model_name = 'multi_normal_linear',
                                        data = multi_normal_data_for_stan,
@@ -742,21 +746,98 @@ multi_normal_linear_fit <- rstan::stan(file = 'stan scripts/multi_normal_linear.
                                        control = list(adapt_delta = 0.99)
                                        )
 
-# Hopefully no divergent transitions! The alpha_by_subj_raw does NOT interact
-# in the same way with the overall mean, and the sampler runs smoothly.
+# For comparison, here is the hierarchical model without the multi_normal structure
+hierarchical_linear_fit <- rstan::stan(file = 'stan scripts/hierarchical_linear.stan',
+                                       model_name = 'hierarchical_linear',
+                                       data = multi_normal_data_for_stan,
+                                       chains = 4,
+                                       cores = 4,
+                                       iter = 4000,
+                                       warmup = 2000,
+                                       control = list(adapt_delta = 0.99)
+                                       )
 
 # Inspect the trace plots - we want them to look like 'hairy caterpillars''
 # https://druedin.com/2016/12/26/that-hairy-caterpillar/
 rstan::traceplot(multi_normal_linear_fit)
 
 # Create summary object and print out the overall summary (a.k.a. summary$summary)
-summary <- rstan::summary(multi_normal_linear_fit,
-                     probs = c(0.025, 0.5, 0.975)
-                     )
+summary_multi <- rstan::summary(multi_normal_linear_fit,
+                          par = c('alpha_by_subj',
+                                  'beta_by_subj'),
+                          probs = c(0.025, 0.5, 0.975)
+                          )
 
-# We want all the Rhats to be less than 1.01, and we need n_eff to be >100 but
-# ideally in the thousands
-round(summary$summary, 2)
+summary_hierarchical <- rstan::summary(hierarchical_linear_fit,
+                          par = c('alpha_by_subj',
+                                  'beta_by_subj'),
+                          probs = c(0.025, 0.5, 0.975)
+                          )
+
+par_multi <- rstan::extract(multi_normal_linear_fit,
+                            par = c('alpha_mean',
+                                    'beta_mean',
+                                    'alpha_by_subj',
+                                    'beta_by_subj',
+                                    'sd_alpha',
+                                    'sd_beta',
+                                    'sd_y')
+                            )
+
+par_hierarchical <- rstan::extract(hierarchical_linear_fit,
+                                   par = c('alpha_mean',
+                                           'beta_mean',
+                                           'alpha_by_subj',
+                                           'beta_by_subj',
+                                           'sd_alpha',
+                                           'sd_beta',
+                                           'sd_y')
+                                   )
+
+par(mfrow = c(3, 3))
+
+plot(x = colMeans(par_hierarchical$alpha_by_subj),
+     y = colMeans(par_multi$alpha_by_subj[, 1, ])
+     )
+
+plot(x = colMeans(par_hierarchical$beta_by_subj),
+     y = colMeans(par_multi$beta_by_subj[, 1, ])
+     )
+
+plot(x = cor(colMeans(par_hierarchical$alpha_by_subj), colMeans(par_hierarchical$beta_by_subj)),
+     y = cor(colMeans(par_multi$alpha_by_subj[, 1, ]), colMeans(par_multi$beta_by_subj[, 1 ,]))
+     )
+
+plot(x = true_multi_normal$alpha,
+     y = colMeans(par_multi$alpha_by_subj[, 1, ])
+     )
+
+plot(x = true_multi_normal$beta,
+     y = colMeans(par_multi$beta_by_subj[, 1, ]))
+
+plot(x = colMeans(par_multi$alpha_by_subj),
+     y = colMeans(par_multi$beta_by_subj)
+     )
+
+plot(x = true_multi_normal$alpha,
+     y = colMeans(par_hierarchical$alpha_by_subj)
+     )
+
+plot(x = true_multi_normal$beta,
+     y = colMeans(par_hierarchical$beta_by_subj)
+     )
+
+plot(x = colMeans(par_hierarchical$alpha_by_subj),
+     y = colMeans(par_hierarchical$beta_by_subj)
+     )
+
+par(mfrow = c(1, 1))
+
+```
+
+Multivariate normal - a closer look
+
+```{r a closer look into the results from the multi_normal}
 
 # Extract the posterior distributions from the fit
 par <- rstan::extract(multi_normal_linear_fit,
@@ -862,12 +943,6 @@ quantile_df <- function(x, probs = c(0.025, 0.5, 0.975)) {
   )
 }
 
-# ALPHA PARAMETER
-# 
-# plot(x = true_linear$beta,
-#      y = colMeans(par$beta_by_subj)
-#      )
-
 df_alpha_quantiles <- df_long %>%
                         filter(parameter == 'alpha_by_subj') %>%
                         reframe(quantile_df(sample), .by = subj_id) %>%
@@ -927,13 +1002,219 @@ cor(df_alpha_quantiles$median,
 
 estimated_Omega <- rstan::extract(multi_normal_linear_fit, par = c('Sigma', 'L', 'Omega'))
 
-str(estimated_Omega$Omega)
-str(estimated_Omega$L)
+colMeans(estimated_Omega$Sigma)
+colMeans(estimated_Omega$L)
+colMeans(estimated_Omega$Omega)
+
 
 ```
 
-Modelling data in a hierarchical structure.
-Modelling data in multivariate normal hierarchical model
+Sigmoid
+```{r sigmoid 4PL}
+# Update any settings?
+
+N <- 20
+n_rep <- 3
+x_series <- seq(from = -10, to = 10, by = 2)
+sd_y <- 5
+
+Omega <- matrix(data = c(   1, -0.9,  0.2,    0,
+                            -0.9,    1,  0.1,    0,
+                            0.2,  0.1,    1, -0.5,
+                            0,    0, -0.5,    1),
+                ncol = 4)
+
+mu <- c(95, 1, 5, 10)
+sigma <- c(10, 0.2, 1, 3)
+
+# Transform from correlation matrix to covariance matrix
+Sigma <- diag(sigma) %*% Omega %*% diag(sigma)
+
+true_multi_normal <- data.frame(
+    subj_id = 1:N,
+    alpha = NA,
+    beta = NA,
+    gamma = NA,
+    delta = NA
+)
+
+true_multi_normal[, 2:5] <- MASS::mvrnorm(n = N,
+                                          mu = mu,
+                                          Sigma = Sigma)
+
+# We can then create a new data structure ...
+multi_normal_data <- data.frame(
+    subj_id = gl(n = N, k = n_rep * length(x_series)),
+    rep = rep(x = 1:n_rep,
+              times = N * length(x_series)),
+    x = rep(x = sort(rep(x_series, n_rep)),
+            times = N),
+    y = NA
+)
+
+logistic_4PL <- function(alpha, beta, gamma, delta, x) {
+    y <- delta + (alpha - delta) / (1 + exp(-beta * (x - gamma)))
+    return(y)
+}
+
+#Test the function
+    logistic_4PL(
+        alpha = true_multi_normal$alpha[multi_normal_data$subj_id],
+        beta = true_multi_normal$beta[multi_normal_data$subj_id],
+        gamma = true_multi_normal$gamma[multi_normal_data$subj_id],
+        delta = true_multi_normal$delta[multi_normal_data$subj_id],
+        x = multi_normal_data$x
+    )
+
+# And randomise some values (with noise)
+multi_normal_data$y <-
+    logistic_4PL(
+        alpha = true_multi_normal$alpha[multi_normal_data$subj_id],
+        beta = true_multi_normal$beta[multi_normal_data$subj_id],
+        gamma = true_multi_normal$gamma[multi_normal_data$subj_id],
+        delta = true_multi_normal$delta[multi_normal_data$subj_id],
+        x = multi_normal_data$x
+    ) +
+    # Add random noise defined by sd_y
+    rnorm(n = length(multi_normal_data$y),
+          mean = 0,
+          sd = sd_y)
+
+multi_normal_data %>%
+    group_by(subj_id, x) %>%
+    summarise(mean = mean(y))
+
+# Example plots - note that slopes get lower, the higher the intercept!
+ggplot(data = filter(multi_normal_data, subj_id %in% c(1, 2, 3, 4, 5, 6)),
+       mapping = aes(x = x,
+                     y = y,
+                     colour = subj_id)) +
+    geom_jitter(width = 0.1) +
+    theme_bw()
+
+```
+
+Sigmoid in Stan
+
+```{r stan for sigmoid}
+
+multi_normal_data_for_stan <- list(n_y = dim(multi_normal_data)[1],
+                                   n_subj = length(unique(multi_normal_data$subj_id)),
+                                   n_theta = 4,
+                                   subj_id = as.integer(multi_normal_data$subj_id),
+                                   x = multi_normal_data$x,
+                                   y = multi_normal_data$y)
+
+# Disclaimer - the next model will make a very poor fit. We will learn something
+# from the experience by looking at the fit afterwards but the other downside
+# is that the samples takes a long time to complete.
+
+# run_stan function
+# This script checks if the fit is already saved, before going ahead and
+# running the script. If the script is already there, the function will simple
+# read it from file instead of going through the trouble of sampling. If the
+# fit is not there, the sampler will run and also save the .RDS file.
+run_stan <- function(file,
+                     data,
+                     model_name = 'model',
+                     chains = 4,
+                     cores = 4,
+                     iter = 4000,
+                     warmup = 2000,
+                     control = list(adapt_delta = 0.99,
+                                    max_treedepth = 20),
+                     force_run = FALSE,
+                     shiny = FALSE) {
+    
+    fit_name <- paste0('fit_', model_name)
+    fit_name_rds <- paste0(fit_name, '.RDS') 
+    
+    if ( (fit_name_rds %in% list.files('fits/')) & (force_run == FALSE) ) {
+        
+        # If a file with this name exists and if force_run == FALSE,
+        # read the file instead of re-running the sampler
+        fit <- readRDS(file = paste0('fits/',
+                                     fit_name_rds)
+                            )
+    
+    } else if ( (!fit_name_rds %in% list.files('fits/')) | (force_run == TRUE) ) {
+
+        # If the file does not exist or if force_run == TRUE, sample away!
+        fit <- rstan::stan(
+            file = file,
+            data = data,
+            model_name = 'multi_normal_4PL',
+            chains = 4,
+            cores = 4,
+            iter = 4000,
+            warmup = 2000,
+            control = list(adapt_delta = 0.99,
+                           max_treedepth = 20)
+            )
+        
+        saveRDS(object = fit_name,
+                file = paste0('fits/',
+                              fit_name_rds)
+                )
+        
+    }
+    
+    return(fit)
+    
+}
+
+# First attempt - no boundaries set! A 4-parameter logistic function without
+# boundaries can "flip" and there are, therefore, many possibly solutions!
+fit_multi_normal_4PL_no_boundaries <-
+    run_stan(file = 'stan scripts/multi_normal_4PL_no_boundaries.stan',
+             data = multi_normal_data_for_stan,
+             model_name = 'multi_normal_4PL_no_boundaries')
+
+# Second strategy - with boundaries on beta
+fit_multi_normal_4PL_with_boundaries <-
+    run_stan(file = 'stan scripts/multi_normal_non-transformed_4PL.stan',
+             data = multi_normal_data_for_stan,
+             model_name = 'multi_normal_4PL_with_boundaries')
+
+# Third strategy - with transformed values
+fit_multi_normal_4PL <-
+    run_stan(file = 'stan scripts/multi_normal_4PL.stan',
+             data = multi_normal_data_for_stan,
+             model_name = 'multi_normal_4PL')
+
+# Best ever example ever of non-convergence
+rstan::traceplot(fit_multi_normal_4PL_no_boundaries, par = 'alpha_mean')
+rstan::traceplot(fit_multi_normal_4PL_with_boundaries, par = 'alpha_mean')
+rstan::traceplot(fit_multi_normal_4PL, par = 'alpha_mean')
+
+par <- rstan::extract(fit_multi_normal_4PL)
+
+par(mfrow = c(2, 2))
+plot(x = true_multi_normal$alpha,
+     y = colMeans(par$alpha_by_subj))
+
+plot(x = true_multi_normal$beta,
+     y = colMeans(par$beta_by_subj))
+
+plot(x = true_multi_normal$gamma,
+     y = colMeans(par$gamma_by_subj))
+
+plot(x = true_multi_normal$delta,
+     y = colMeans(par$delta_by_subj))
+par(mfrow = c(1, 1))
+
+colMeans(par$Omega)
+cor(colMeans(par$alpha_by_subj[, 1, ]),
+    colMeans(par$beta_by_subj[, 1, ])
+    )
+
+```
+
+## Within-subject structure
+
+## Between-subject structure
+
+## Reinforcement learning
 
 
 
